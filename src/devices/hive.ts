@@ -100,6 +100,50 @@ function parseHiveSchedule(value: unknown): {transitionTime: number; heatSetpoin
     });
 }
 
+/**
+ * Hive SLR1c receivers have been observed padding short schedule read-backs
+ * with identical timestamps, which confuses the paired Hive thermostat.
+ * Send six distinct transitions instead, without changing effective setpoints.
+ *
+ * Never insert a transition before the first supplied time: that would change
+ * the temperature inherited from the previous day's schedule.
+ */
+function padHiveSchedule(transitions: {transitionTime: number; heatSetpoint: number}[]): {transitionTime: number; heatSetpoint: number}[] {
+    // A receiver read-back may already contain identical filler transitions.
+    const unique = transitions.filter((transition, index) => index === 0 || transition.transitionTime !== transitions[index - 1].transitionTime);
+    if (unique.length === 6) return unique;
+
+    const needed = 6 - unique.length;
+    const lastTime = unique[unique.length - 1].transitionTime;
+
+    // Prefer hourly filler slots, then use finer spacing only if necessary.
+    // Each filler repeats the preceding real setpoint, so heating is unchanged.
+    for (const interval of [60, 30, 15, 5, 1]) {
+        const available: typeof unique = [];
+        for (let index = 0; index < unique.length; index++) {
+            const current = unique[index];
+            const nextTime = unique[index + 1]?.transitionTime ?? 1440;
+            for (let time = current.transitionTime + interval; time < nextTime; time += interval) {
+                available.push({transitionTime: time, heatSetpoint: current.heatSetpoint});
+            }
+        }
+
+        if (available.length < needed) continue;
+
+        // Favour slots after the final meaningful transition (as verified on
+        // the physical thermostat), then fill earlier gaps if near midnight.
+        const following = available.filter((transition) => transition.transitionTime > lastTime);
+        const earlier = available.filter((transition) => transition.transitionTime < lastTime);
+        const padding = following.slice(0, needed);
+        if (padding.length < needed) {
+            padding.push(...earlier.slice(-(needed - padding.length)));
+        }
+        return [...unique, ...padding].sort((a, b) => a.transitionTime - b.transitionTime);
+    }
+
+    throw new Error("Cannot safely create six distinct Hive schedule slots after the first transition; use an earlier first time");
+}
+
 const hiveScheduleToZigbee: Tz.Converter = {
     key: scheduleKeys,
     convertSet: async (entity, key, value, meta) => {
@@ -107,7 +151,7 @@ const hiveScheduleToZigbee: Tz.Converter = {
         const bit = scheduleDays.indexOf(day as (typeof scheduleDays)[number]);
         if (bit < 0) throw new Error(`Unknown schedule day: ${day}`);
 
-        const transitions = parseHiveSchedule(value);
+        const transitions = padHiveSchedule(parseHiveSchedule(value));
         await entity.command(
             "hvacThermostat",
             "setWeeklySchedule",
@@ -409,7 +453,7 @@ export const definitions: DefinitionWithExtend[] = [
                 e
                     .text(`schedule_${day}`, ea.ALL)
                     .withCategory("config")
-                    .withDescription("Native Hive heating schedule, HH:mm/°C (up to six transitions)"),
+                    .withDescription("Native Hive heating schedule, HH:mm/°C (up to six transitions; writes six distinct slots)"),
             ),
             e
                 .climate()
