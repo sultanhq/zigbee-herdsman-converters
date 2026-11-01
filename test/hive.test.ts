@@ -133,7 +133,11 @@ describe("Hive SLR1c daily heating schedules", () => {
                 mode: 1,
                 transitions: [
                     {transitionTime: 360, heatSetpoint: 2050},
-                    ...Array.from({length: 5}, () => ({transitionTime: 1170, heatSetpoint: 100})),
+                    {transitionTime: 1170, heatSetpoint: 100},
+                    {transitionTime: 1230, heatSetpoint: 100},
+                    {transitionTime: 1290, heatSetpoint: 100},
+                    {transitionTime: 1350, heatSetpoint: 100},
+                    {transitionTime: 1410, heatSetpoint: 100},
                 ],
             },
             expect.any(Object),
@@ -147,11 +151,119 @@ describe("Hive SLR1c daily heating schedules", () => {
             "setWeeklySchedule",
             {
                 dayofweek: 32,
-                numoftrans: 2,
+                numoftrans: 6,
                 mode: 1,
                 transitions: [
                     {transitionTime: 360, heatSetpoint: 2125},
                     {transitionTime: 1170, heatSetpoint: 100},
+                    {transitionTime: 1230, heatSetpoint: 100},
+                    {transitionTime: 1290, heatSetpoint: 100},
+                    {transitionTime: 1350, heatSetpoint: 100},
+                    {transitionTime: 1410, heatSetpoint: 100},
+                ],
+            },
+            expect.any(Object),
+        );
+    });
+
+    it("preserves the six distinct slots verified on the physical Hive thermostat", async () => {
+        // Arrange: an already valid six-slot Friday schedule.
+        const schedule = "06:30/21 19:30/1 20:30/1 21:30/1 22:30/1 23:30/1";
+        // Act: send the schedule to the receiver.
+        await convertSet(endpoint, "schedule_friday", schedule, meta);
+        // Assert: every time and setpoint stays exactly as entered.
+        expect(command).toHaveBeenCalledWith(
+            "hvacThermostat",
+            "setWeeklySchedule",
+            {
+                dayofweek: 32,
+                numoftrans: 6,
+                mode: 1,
+                transitions: [
+                    {transitionTime: 390, heatSetpoint: 2100},
+                    {transitionTime: 1170, heatSetpoint: 100},
+                    {transitionTime: 1230, heatSetpoint: 100},
+                    {transitionTime: 1290, heatSetpoint: 100},
+                    {transitionTime: 1350, heatSetpoint: 100},
+                    {transitionTime: 1410, heatSetpoint: 100},
+                ],
+            },
+            expect.any(Object),
+        );
+    });
+
+    it("pads three meaningful transitions with the final setpoint", async () => {
+        // Arrange: the card supplies only the three schedule changes.
+        const schedule = "06:30/21 19:30/1 20:30/1";
+        // Act: convert the abbreviated schedule.
+        await convertSet(endpoint, "schedule_friday", schedule, meta);
+        // Assert: all six slots are unique, and none starts an extra heating period.
+        expect(command).toHaveBeenCalledWith(
+            "hvacThermostat",
+            "setWeeklySchedule",
+            {
+                dayofweek: 32,
+                numoftrans: 6,
+                mode: 1,
+                transitions: [
+                    {transitionTime: 390, heatSetpoint: 2100},
+                    {transitionTime: 1170, heatSetpoint: 100},
+                    {transitionTime: 1230, heatSetpoint: 100},
+                    {transitionTime: 1290, heatSetpoint: 100},
+                    {transitionTime: 1350, heatSetpoint: 100},
+                    {transitionTime: 1410, heatSetpoint: 100},
+                ],
+            },
+            expect.any(Object),
+        );
+    });
+
+    it("uses preceding intervals for filler when the final change is near midnight", async () => {
+        // Arrange: there is no room after the final 23:59 setback.
+        const schedule = "06:30/20 23:59/1";
+        // Act: expand to six slots without moving the real setback.
+        await convertSet(endpoint, "schedule_monday", schedule, meta);
+        // Assert: the additional slots repeat 20°C before 23:59; none changes the heating window.
+        expect(command).toHaveBeenCalledWith(
+            "hvacThermostat",
+            "setWeeklySchedule",
+            {
+                dayofweek: 2,
+                numoftrans: 6,
+                mode: 1,
+                transitions: [
+                    {transitionTime: 390, heatSetpoint: 2000},
+                    {transitionTime: 1170, heatSetpoint: 2000},
+                    {transitionTime: 1230, heatSetpoint: 2000},
+                    {transitionTime: 1290, heatSetpoint: 2000},
+                    {transitionTime: 1350, heatSetpoint: 2000},
+                    {transitionTime: 1439, heatSetpoint: 100},
+                ],
+            },
+            expect.any(Object),
+        );
+    });
+
+    it("uses finer spacing for late single-transition schedules", async () => {
+        // Arrange: only three hours remain after a single 20:00 change.
+        const schedule = "20:00/20";
+        // Act: pad using 30-minute intervals.
+        await convertSet(endpoint, "schedule_saturday", schedule, meta);
+        // Assert: every slot is distinct, with the same temperature throughout.
+        expect(command).toHaveBeenCalledWith(
+            "hvacThermostat",
+            "setWeeklySchedule",
+            {
+                dayofweek: 64,
+                numoftrans: 6,
+                mode: 1,
+                transitions: [
+                    {transitionTime: 1200, heatSetpoint: 2000},
+                    {transitionTime: 1230, heatSetpoint: 2000},
+                    {transitionTime: 1260, heatSetpoint: 2000},
+                    {transitionTime: 1290, heatSetpoint: 2000},
+                    {transitionTime: 1320, heatSetpoint: 2000},
+                    {transitionTime: 1350, heatSetpoint: 2000},
                 ],
             },
             expect.any(Object),
@@ -180,6 +292,7 @@ describe("Hive SLR1c daily heating schedules", () => {
         ["19:30/1 06:00/20.5", "chronological order"],
         ["06:00/20 07:00/20 08:00/20 09:00/20 10:00/20 11:00/20 12:00/20", "at most six"],
         ["06:00/21 19:30", "expected HH:mm/temperature"],
+        ["23:58/18", "Cannot safely create six distinct"],
     ])("rejects invalid schedule '%s' without sending any Zigbee command", async (value, message) => {
         // Act and assert: invalid input must never reach the receiver.
         await expect(convertSet(endpoint, "schedule_monday", value, meta)).rejects.toThrow(message);
